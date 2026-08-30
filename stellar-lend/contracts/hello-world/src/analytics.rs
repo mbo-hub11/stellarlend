@@ -80,6 +80,8 @@ pub enum AnalyticsDataKey {
     CollateralRatioSnapshots,
     /// Collateral risk thresholds: CollateralRiskThresholds
     CollateralRiskThresholds,
+    /// Lender budget plan: BudgetPlan
+    BudgetPlan(Address),
 }
 
 /// Snapshot of protocol-wide metrics.
@@ -1676,5 +1678,283 @@ pub fn simulate_what_if(
         max_withdrawable_amount,
         max_borrowable_amount,
     })
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Budget Planner for Lenders (Issue #856)
+//
+// Provides budget planning tools for lenders to optimize their lending
+// strategies, including yield projections, allocation recommendations,
+// and risk-adjusted return calculations.
+// ─────────────────────────────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct BudgetPlan {
+    pub lender: Address,
+    pub total_budget: i128,
+    pub risk_appetite: Symbol,
+    pub allocated_deposit: i128,
+    pub allocated_reserve: i128,
+    pub expected_apy_bps: i128,
+    pub projected_yield: i128,
+    pub recommendations: Vec<Symbol>,
+    pub created_at: u64,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct YieldProjection {
+    pub period_days: u32,
+    pub conservative_apy_bps: i128,
+    pub moderate_apy_bps: i128,
+    pub aggressive_apy_bps: i128,
+    pub projected_return_conservative: i128,
+    pub projected_return_moderate: i128,
+    pub projected_return_aggressive: i128,
+    pub assumptions: Symbol,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AllocationStrategy {
+    pub strategy_name: Symbol,
+    pub deposit_pct_bps: i128,
+    pub reserve_pct_bps: i128,
+    pub expected_apy_bps: i128,
+    pub risk_level: Symbol,
+    pub description: Symbol,
+}
+
+const BUDGET_PLAN_PREFIX: u32 = 0x01;
+
+/// Create a personalized budget plan for a lender based on their budget,
+/// risk appetite, and current market conditions.
+///
+/// Allocates funds between active lending (higher yield, higher risk) and
+/// reserve holding (lower yield, lower risk) to optimize returns while
+/// respecting the lender's risk tolerance.
+pub fn create_budget_plan(
+    env: &Env,
+    lender: Address,
+    total_budget: i128,
+    risk_appetite: Symbol,
+) -> Result<BudgetPlan, AnalyticsError> {
+    if total_budget <= 0 {
+        return Err(AnalyticsError::InvalidParameter);
+    }
+
+    let risk_str = risk_appetite.to_string();
+    let (deposit_pct, reserve_pct, base_apy) = if risk_str == "conservative" {
+        (6000, 4000, 300)
+    } else if risk_str == "aggressive" {
+        (9000, 1000, 800)
+    } else {
+        (7500, 2500, 500)
+    };
+
+    let allocated_deposit = (total_budget * deposit_pct) / BASIS_POINTS;
+    let allocated_reserve = total_budget - allocated_deposit;
+
+    let utilization = get_protocol_utilization(env).unwrap_or(5000);
+    let utilization_bonus = if utilization > 7000 {
+        (utilization - 7000) * 10 / BASIS_POINTS
+    } else {
+        0
+    };
+
+    let expected_apy = base_apy + utilization_bonus;
+    let projected_yield = (allocated_deposit * expected_apy) / BASIS_POINTS;
+
+    let mut recommendations = Vec::new(env);
+    if utilization > 8000 {
+        recommendations.push_back(Symbol::new(env, "high_utilization_boost_yields"));
+    }
+    if utilization < 4000 {
+        recommendations.push_back(Symbol::new(env, "low_utilization_consider_staking"));
+    }
+    if risk_str == "conservative" && utilization > 7000 {
+        recommendations.push_back(Symbol::new(env, "consider_increasing_reserve"));
+    }
+    if risk_str == "aggressive" && utilization < 5000 {
+        recommendations.push_back(Symbol::new(env, "deploy_more_capital"));
+    }
+    recommendations.push_back(Symbol::new(env, "diversify_across_pools"));
+    recommendations.push_back(Symbol::new(env, "compound_yields_regularly"));
+
+    let plan = BudgetPlan {
+        lender: lender.clone(),
+        total_budget,
+        risk_appetite,
+        allocated_deposit,
+        allocated_reserve,
+        expected_apy_bps: expected_apy,
+        projected_yield,
+        recommendations,
+        created_at: env.ledger().timestamp(),
+    };
+
+    let key = AnalyticsDataKey::BudgetPlan(lender.clone());
+    env.storage().persistent().set(&key, &plan);
+
+    Ok(plan)
+}
+
+/// Get a lender's stored budget plan.
+pub fn get_budget_plan(env: &Env, lender: &Address) -> Option<BudgetPlan> {
+    let key = AnalyticsDataKey::BudgetPlan(lender.clone());
+    env.storage().persistent().get(&key)
+}
+
+/// Project yields over different time periods based on current protocol
+/// conditions and the lender's chosen risk profile.
+pub fn project_yields(
+    env: &Env,
+    total_budget: i128,
+    risk_appetite: Symbol,
+    period_days: u32,
+) -> Result<YieldProjection, AnalyticsError> {
+    if total_budget <= 0 || period_days == 0 {
+        return Err(AnalyticsError::InvalidParameter);
+    }
+
+    let risk_str = risk_appetite.to_string();
+    let (conservative_apy, moderate_apy, aggressive_apy) = if risk_str == "conservative" {
+        (250, 350, 500)
+    } else if risk_str == "aggressive" {
+        (500, 800, 1200)
+    } else {
+        (350, 500, 700)
+    };
+
+    let periods = period_days as i128;
+    let conservative_return = (total_budget * conservative_apy * periods) / (BASIS_POINTS * 365);
+    let moderate_return = (total_budget * moderate_apy * periods) / (BASIS_POINTS * 365);
+    let aggressive_return = (total_budget * aggressive_apy * periods) / (BASIS_POINTS * 365);
+
+    let utilization = get_protocol_utilization(env).unwrap_or(5000);
+    let assumptions = if utilization > 7000 {
+        Symbol::new(env, "high_utilization_environment")
+    } else if utilization < 4000 {
+        Symbol::new(env, "low_utilization_environment")
+    } else {
+        Symbol::new(env, "normal_market_conditions")
+    };
+
+    Ok(YieldProjection {
+        period_days,
+        conservative_apy_bps: conservative_apy,
+        moderate_apy_bps: moderate_apy,
+        aggressive_apy_bps: aggressive_apy,
+        projected_return_conservative: conservative_return,
+        projected_return_moderate: moderate_return,
+        projected_return_aggressive: aggressive_return,
+        assumptions,
+    })
+}
+
+/// Get pre-defined allocation strategies for lenders.
+///
+/// Returns conservative, moderate, and aggressive allocation templates
+/// that lenders can use as starting points for their budget planning.
+pub fn get_allocation_strategies(env: &Env) -> Vec<AllocationStrategy> {
+    let mut strategies = Vec::new(env);
+
+    strategies.push_back(AllocationStrategy {
+        strategy_name: Symbol::new(env, "conservative"),
+        deposit_pct_bps: 6000,
+        reserve_pct_bps: 4000,
+        expected_apy_bps: 300,
+        risk_level: Symbol::new(env, "low"),
+        description: Symbol::new(env, "steady_income_minimal_risk"),
+    });
+
+    strategies.push_back(AllocationStrategy {
+        strategy_name: Symbol::new(env, "moderate"),
+        deposit_pct_bps: 7500,
+        reserve_pct_bps: 2500,
+        expected_apy_bps: 500,
+        risk_level: Symbol::new(env, "medium"),
+        description: Symbol::new(env, "balanced_yield_and_safety"),
+    });
+
+    strategies.push_back(AllocationStrategy {
+        strategy_name: Symbol::new(env, "aggressive"),
+        deposit_pct_bps: 9000,
+        reserve_pct_bps: 1000,
+        expected_apy_bps: 800,
+        risk_level: Symbol::new(env, "high"),
+        description: Symbol::new(env, "maximize_yield_accept_higher_risk"),
+    });
+
+    strategies
+}
+
+/// Calculate risk-adjusted return for a given allocation.
+///
+/// Uses a simplified Sharpe-like ratio: return / (risk_factor + 1).
+pub fn calculate_risk_adjusted_return(
+    env: &Env,
+    allocated_amount: i128,
+    expected_apy_bps: i128,
+    risk_level: Symbol,
+) -> Result<i128, AnalyticsError> {
+    if allocated_amount <= 0 {
+        return Err(AnalyticsError::InvalidParameter);
+    }
+
+    let risk_str = risk_level.to_string();
+    let risk_factor = if risk_str == "low" {
+        1
+    } else if risk_str == "high" {
+        3
+    } else {
+        2
+    };
+
+    let annual_return = (allocated_amount * expected_apy_bps) / BASIS_POINTS;
+    let risk_adjusted = annual_return / (risk_factor * 100);
+
+    Ok(risk_adjusted)
+}
+
+/// Compare multiple budget scenarios side by side.
+///
+/// Helps lenders evaluate different budget allocations before committing funds.
+pub fn compare_budget_scenarios(
+    env: &Env,
+    total_budget: i128,
+) -> Result<Vec<BudgetPlan>, AnalyticsError> {
+    if total_budget <= 0 {
+        return Err(AnalyticsError::InvalidParameter);
+    }
+
+    let mut scenarios = Vec::new(env);
+
+    let conservative = create_budget_plan(
+        env,
+        Address::from_string(&soroban_sdk::String::from_str(env, "______________________________________________________________________")),
+        total_budget,
+        Symbol::new(env, "conservative"),
+    )?;
+    scenarios.push_back(conservative);
+
+    let moderate = create_budget_plan(
+        env,
+        Address::from_string(&soroban_sdk::String::from_str(env, "______________________________________________________________________")),
+        total_budget,
+        Symbol::new(env, "moderate"),
+    )?;
+    scenarios.push_back(moderate);
+
+    let aggressive = create_budget_plan(
+        env,
+        Address::from_string(&soroban_sdk::String::from_str(env, "______________________________________________________________________")),
+        total_budget,
+        Symbol::new(env, "aggressive"),
+    )?;
+    scenarios.push_back(aggressive);
+
+    Ok(scenarios)
 }
 
