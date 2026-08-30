@@ -14,6 +14,7 @@
 mod amm_benchmarks;
 mod bridge_benchmarks;
 mod framework;
+mod gas_estimate_benchmarks;
 mod hello_world_benchmarks;
 mod lending_benchmarks;
 mod pool_factory_benchmarks;
@@ -36,6 +37,7 @@ fn main() {
     let mut suite = BenchmarkSuite::new(config.clone());
 
     // Register all contract benchmark modules
+    gas_estimate_benchmarks::register(&mut suite);
     lending_benchmarks::register(&mut suite);
     hello_world_benchmarks::register(&mut suite);
     amm_benchmarks::register(&mut suite);
