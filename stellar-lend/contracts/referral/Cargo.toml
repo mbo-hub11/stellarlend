@@ -1,0 +1,15 @@
+[package]
+name = "referral"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = { workspace = true }
+stellarlend-safe-math = { path = "../safe-math" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
